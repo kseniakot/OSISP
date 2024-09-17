@@ -4,71 +4,61 @@
 #include <algorithm>
 #include <chrono>
 #include <mutex>
+#include <Pdh.h>
+#include <PdhMsg.h>
 
 std::mutex coutMutex;
 
-// Для получения данных о загруженности системы
-ULONGLONG fileTimeToULONGLONG(const FILETIME &ft) {
-    return (((ULONGLONG)ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+static PDH_HQUERY cpuQuery;
+static PDH_HCOUNTER cpuTotal;
+
+
+void initCpuQuery() {
+    PdhOpenQuery(NULL, 0, &cpuQuery);
+    PdhAddEnglishCounterW(cpuQuery, L"\\Processor(_Total)\\% Processor Time", 0, &cpuTotal);
+    PdhCollectQueryData(cpuQuery);
+    Sleep(5000);
 }
 
+// Function to get the current CPU usage
 double getCpuUsage() {
-    FILETIME idleTime, kernelTime, userTime;
-    if (GetSystemTimes(&idleTime, &kernelTime, &userTime)) {
-        ULONGLONG idle = fileTimeToULONGLONG(idleTime);
-        ULONGLONG kernel = fileTimeToULONGLONG(kernelTime);
-        ULONGLONG user = fileTimeToULONGLONG(userTime);
-        return 100.0 - (idle * 100.0 / (kernel + user));
-    }
-    return 0.0;
+    initCpuQuery();
+    PDH_FMT_COUNTERVALUE counterVal;
+    PdhCollectQueryData(cpuQuery);
+    PdhGetFormattedCounterValue(cpuTotal, PDH_FMT_DOUBLE, NULL, &counterVal);
+    return counterVal.doubleValue;
 }
 
 struct ThreadData {
     int* array;
     int left;
     int right;
-    bool completed = false; // Флаг завершения сортировки
-    int threadId;  // Идентификатор потока
+    bool completed = false; // Flag to indicate sorting completion
+    int threadId;  // Thread identifier
 };
 
-
-// Функция для сортировки массива (quicksort)
-//void quickSort(int* arr, int left, int right) {
-//    if (left < right) {
-//        int pivot = arr[right];
-//        int i = left - 1;
-//        for (int j = left; j < right; ++j) {
-//            if (arr[j] <= pivot) {
-//                std::swap(arr[++i], arr[j]);
-//            }
-//        }
-//        std::swap(arr[i + 1], arr[right]);
-//        quickSort(arr, left, i);
-//        quickSort(arr, i + 2, right);
-//    }
-//}
-
-// Функция, которую будут выполнять потоки
+// Function to be executed by each thread
 DWORD WINAPI threadSort(LPVOID param) {
     ThreadData* data = (ThreadData*)param;
 
-    // Получение загрузки ЦП перед началом работы потока
+    // Get initial CPU usage
     double initialCpuUsage = getCpuUsage();
 
+    // Sort array segment
     std::sort(data->array + data->left, data->array + data->right + 1);
 
     {
         std::lock_guard<std::mutex> lock(coutMutex);
-        std::cout << "Поток " << data->threadId << ": готов\n";
+        std::cout << "Thread " << data->threadId << ": done\n";
         double finalCpuUsage = getCpuUsage();
-        std::cout << "Поток " << data->threadId << ": Загрузка ЦП до: " << initialCpuUsage << "%, после: " << finalCpuUsage << "%\n";
+        std::cout << "Thread " << data->threadId << ": CPU load before: " << initialCpuUsage << "%, after: " << finalCpuUsage << "%\n";
     }
 
-    data->completed = true;  // Установка флага завершения
+    data->completed = true;  // Mark sorting as completed
     return 0;
 }
 
-// Функция для слияния отсортированных частей
+// Merge sorted array segments
 void merge(int* arr, int left, int mid, int right) {
     int leftSize = mid - left + 1;
     int rightSize = right - mid;
@@ -98,32 +88,32 @@ void merge(int* arr, int left, int mid, int right) {
     }
 }
 
-// Функция для параллельной сортировки
+// Parallel sort function
 void parallelSort(int* arr, int size, int numThreads) {
     std::vector<HANDLE> threads(numThreads);
     std::vector<ThreadData> threadData(numThreads);
 
     int chunkSize = size / numThreads;
 
-    // Запуск потоков для сортировки своих частей массива
+    // Start threads for sorting array segments
     for (int i = 0; i < numThreads; ++i) {
         int left = i * chunkSize;
         int right = (i == numThreads - 1) ? size - 1 : (left + chunkSize - 1);
 
-        threadData[i] = { arr, left, right, 0 };  // Идентификатор потока будет установлен ниже
-        threadData[i].threadId = i;  // Установка идентификатора потока
+        threadData[i] = { arr, left, right, 0 };  // Thread data initialization
+        threadData[i].threadId = i;  // Set thread identifier
         threads[i] = CreateThread(NULL, 0, threadSort, &threadData[i], 0, NULL);
     }
 
-    // Ожидание завершения всех потоков сортировки
+    // Wait for all sorting threads to complete
     WaitForMultipleObjects(numThreads, threads.data(), TRUE, INFINITE);
 
-    // Закрытие дескрипторов потоков сортировки
+    // Close thread handles
     for (HANDLE& thread : threads) {
         CloseHandle(thread);
     }
 
-    // Слияние отсортированных частей массива
+    // Merge sorted array segments
     for (int sizeMerge = chunkSize; sizeMerge < size; sizeMerge *= 2) {
         for (int i = 0; i < size; i += 2 * sizeMerge) {
             int mid = std::min(i + sizeMerge - 1, size - 1);
@@ -133,31 +123,30 @@ void parallelSort(int* arr, int size, int numThreads) {
     }
 }
 
-
 int main() {
-    int size = 1'000'000, numThreads = 1;
+    int size = 1'000'000, numThreads = 4;
 
-    std::cout << "Введите размер массива: ";
-    std::cout << size << "\n";  // Ввод массива пропущен для упрощения
-
-    std::cout << "Введите количество потоков: ";
-    std::cout << numThreads << "\n";  // Ввод количества потоков пропущен для упрощения
+    std::cout << "Array size: " << size << "\n";
+    std::cout << "Number of threads: " << numThreads << "\n";
 
     if (numThreads < 1 || size < numThreads) {
-        std::cout << "Некорректное количество потоков или размер массива.\n";
+        std::cout << "Invalid number of threads or array size.\n";
         return -1;
     }
 
-    // Инициализация массива
+    // Initialize array
     std::vector<int> array(size);
     for (int j = 0; j < size; j++) {
-        array[j] = j % 10;  // Заполнение массива для тестирования
+        array[j] = j % 10;  // Fill array for testing
     }
 
-    double initialCpuUsage = getCpuUsage();
-    std::cout << "Загрузка ЦП перед началом: " << initialCpuUsage << "%\n";
+    // Initialize CPU usage query
+    initCpuQuery();
 
-    // Замер времени
+    double initialCpuUsage = getCpuUsage();
+    std::cout << "CPU load before start: " << initialCpuUsage << "%\n";
+
+    // Measure time taken for sorting
     auto start = std::chrono::high_resolution_clock::now();
 
     parallelSort(array.data(), size, numThreads);
@@ -165,14 +154,10 @@ int main() {
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> duration = end - start;
 
-    std::cout << "\nВремя выполнения: " << duration.count() << " секунд\n";
+    std::cout << "\nExecution time: " << duration.count() << " seconds\n";
 
     double finalCpuUsage = getCpuUsage();
-    std::cout << "Загрузка ЦП после выполнения: " << finalCpuUsage << "%\n";
-
-    for (size_t i = 0; i < size; ++i) {
-        std::cout << array[i];
-    }
+    std::cout << "CPU load after execution: " << finalCpuUsage << "%\n";
 
     return 0;
 }
