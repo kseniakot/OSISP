@@ -26,7 +26,6 @@ public:
     double getCpuUsage() {
         PDH_FMT_COUNTERVALUE counterVal;
         PdhCollectQueryData(cpuQuery);
-        Sleep(1000);
         PdhGetFormattedCounterValue(cpuTotal, PDH_FMT_DOUBLE, NULL, &counterVal);
         return counterVal.doubleValue;
     }
@@ -36,7 +35,8 @@ private:
     PDH_HCOUNTER cpuTotal{};
 };
 
-VOID CALLBACK MonitorCpuUsageCallback(PTP_CALLBACK_INSTANCE, PVOID param, PTP_WORK) {
+
+DWORD WINAPI monitorCpuUsage(LPVOID param) {
     auto *cpuMonitor = static_cast<CpuMonitor *>(param);
     std::vector<double> cpuUsageValues;
 
@@ -52,17 +52,19 @@ VOID CALLBACK MonitorCpuUsageCallback(PTP_CALLBACK_INSTANCE, PVOID param, PTP_WO
     double averageCpuUsage = std::accumulate(cpuUsageValues.begin(), cpuUsageValues.end(), 0.0) / cpuUsageValues.size();
     std::lock_guard<std::mutex> lock(coutMutex);
     std::cout << "Average CPU load during execution: " << averageCpuUsage << "%\n";
+
+    return 0;
 }
 
-void merge(int *arr, int left, int mid, int right) {
-    int leftSize = mid - left + 1;
-    int rightSize = right - mid;
-    std::vector<int> leftArray(leftSize), rightArray(rightSize);
+void merge(size_t *arr, size_t left, size_t mid, size_t right) {
+    size_t leftSize = mid - left + 1;
+    size_t rightSize = right - mid;
+    std::vector<size_t> leftArray(leftSize), rightArray(rightSize);
 
-    for (int i = 0; i < leftSize; ++i) leftArray[i] = arr[left + i];
-    for (int i = 0; i < rightSize; ++i) rightArray[i] = arr[mid + 1 + i];
+    for (size_t i = 0; i < leftSize; ++i) leftArray[i] = arr[left + i];
+    for (size_t i = 0; i < rightSize; ++i) rightArray[i] = arr[mid + 1 + i];
 
-    int i = 0, j = 0, k = left;
+    size_t i = 0, j = 0, k = left;
     while (i < leftSize && j < rightSize) {
         if (leftArray[i] <= rightArray[j]) arr[k++] = leftArray[i++];
         else arr[k++] = rightArray[j++];
@@ -72,20 +74,33 @@ void merge(int *arr, int left, int mid, int right) {
 }
 
 struct TaskData {
-    int *array;
-    int left;
-    int mid;
-    int right;
-    int threadId;
+    size_t *array;
+    size_t left;
+    size_t mid;
+    size_t right;
+    size_t threadId;
 };
 
 VOID CALLBACK SortCallback(PTP_CALLBACK_INSTANCE, PVOID param, PTP_WORK) {
     auto *data = static_cast<TaskData *>(param);
+
+    {
+        std::lock_guard<std::mutex> lock(coutMutex);
+        std::cout << "Thread " << data->threadId << ": started sorting from "
+                  << data->left << " to " << data->right << "\n";
+    }
+
     std::sort(data->array + data->left, data->array + data->right + 1);
 
-    std::lock_guard<std::mutex> lock(coutMutex);
-    std::cout << "\nThread " << data->threadId << ": done sorting\n";
+    {
+        std::lock_guard<std::mutex> lock(coutMutex);
+        std::cout << "Thread " << data->threadId << ": done sorting\n";
+    }
 }
+
+
+
+
 
 VOID CALLBACK MergeCallback(PTP_CALLBACK_INSTANCE, PVOID param, PTP_WORK) {
     auto *data = static_cast<TaskData *>(param);
@@ -95,41 +110,41 @@ VOID CALLBACK MergeCallback(PTP_CALLBACK_INSTANCE, PVOID param, PTP_WORK) {
     std::cout << "\nThread " << data->threadId << ": merged " << data->left << " to " << data->right << "\n";
 }
 
-void parallelSort(int *arr, int size, int numThreads, PTP_POOL pool, PTP_CLEANUP_GROUP cleanupGroup,
+void parallelSort(size_t *arr, size_t size, size_t numThreads, PTP_POOL pool, PTP_CLEANUP_GROUP cleanupGroup,
                   PTP_CALLBACK_ENVIRON callbackEnviron) {
-    int chunkSize = size / numThreads;
+
+    size_t chunkSize = size / numThreads;
     std::vector<TaskData> threadData(numThreads);
     std::vector<PTP_WORK> workItems(numThreads);
 
-    for (int i = 0; i < numThreads; ++i) {
-        int left = i * chunkSize;
-        int right = (i == numThreads - 1) ? size - 1 : (left + chunkSize - 1);
+    for (size_t i = 0; i < numThreads; ++i) {
+        size_t left = i * chunkSize;
+        size_t right = (i == numThreads - 1) ? size - 1 : (left + chunkSize - 1);
         threadData[i] = {arr, left, 0, right, i};
 
         workItems[i] = CreateThreadpoolWork(SortCallback, &threadData[i], callbackEnviron);
         SubmitThreadpoolWork(workItems[i]);
     }
 
-
-    for (int i = 0; i < numThreads; ++i) {
+    for (size_t i = 0; i < numThreads; ++i) {
         WaitForThreadpoolWorkCallbacks(workItems[i], FALSE);
         CloseThreadpoolWork(workItems[i]);
     }
 }
 
-void parallelMerge(int *arr, int size, int numThreads, PTP_POOL pool, PTP_CLEANUP_GROUP cleanupGroup,
+void parallelMerge(size_t *arr, size_t size, size_t numThreads, PTP_POOL pool, PTP_CLEANUP_GROUP cleanupGroup,
                    PTP_CALLBACK_ENVIRON callbackEnviron) {
-    int chunkSize = size / numThreads;
+    size_t chunkSize = size / numThreads;
     std::vector<TaskData> threadData(numThreads);
     std::vector<PTP_WORK> workItems(numThreads);
 
-    for (int mergeSize = chunkSize; mergeSize < size; mergeSize *= 2) {
-        int currentThreads = numThreads / 2;
+    for (size_t mergeSize = chunkSize; mergeSize < size; mergeSize *= 2) {
+        size_t currentThreads = numThreads / 2;
 
-        for (int i = 0; i < currentThreads; ++i) {
-            int left = i * 2 * mergeSize;
-            int mid = std::min(left + mergeSize - 1, size - 1);
-            int right = std::min(left + 2 * mergeSize - 1, size - 1);
+        for (size_t i = 0; i < currentThreads; ++i) {
+            size_t left = i * 2 * mergeSize;
+            size_t mid = std::min(left + mergeSize - 1, size - 1);
+            size_t right = std::min(left + 2 * mergeSize - 1, size - 1);
 
             threadData[i] = {arr, left, mid, right, i};
 
@@ -137,8 +152,7 @@ void parallelMerge(int *arr, int size, int numThreads, PTP_POOL pool, PTP_CLEANU
             SubmitThreadpoolWork(workItems[i]);
         }
 
-
-        for (int i = 0; i < currentThreads; ++i) {
+        for (size_t i = 0; i < currentThreads; ++i) {
             WaitForThreadpoolWorkCallbacks(workItems[i], FALSE);
             CloseThreadpoolWork(workItems[i]);
         }
@@ -147,14 +161,17 @@ void parallelMerge(int *arr, int size, int numThreads, PTP_POOL pool, PTP_CLEANU
     }
 }
 
-void sortAndMerge(int *arr, int size, int numThreads, PTP_POOL pool, PTP_CLEANUP_GROUP cleanupGroup,
+void sortAndMerge(size_t *arr, size_t size, size_t numThreads, PTP_POOL pool, PTP_CLEANUP_GROUP cleanupGroup,
                   PTP_CALLBACK_ENVIRON callbackEnviron) {
+    if (numThreads == 1){
+
+    }
     parallelSort(arr, size, numThreads, pool, cleanupGroup, callbackEnviron);
     parallelMerge(arr, size, numThreads, pool, cleanupGroup, callbackEnviron);
 }
 
-template<typename T>
-void getInput(T &variable, const std::string &prompt, T minValue, T maxValue) {
+
+void getInput(size_t &variable, const std::string &prompt, size_t minValue, size_t maxValue) {
     while (true) {
         std::cout << prompt;
         std::cin >> variable;
@@ -170,20 +187,20 @@ void getInput(T &variable, const std::string &prompt, T minValue, T maxValue) {
 }
 
 int main() {
-    int size = 0, numThreads = 0;
-    getInput(size, "Enter array size (0 - 2'000'000'000): ", 1, 2'000'000'000);
-    getInput(numThreads, "Enter number of threads (1 - 64): ", 1, 64);
+    size_t size = 0, numThreads = 0;
+    getInput(size, "Enter array size (0 - 1'000'000'000): ", 1, 1'000'000'000);
+    size_t maxNumThreads = size > 64 ? 64 : size;
+    getInput(numThreads, "Enter number of threads: ", 1, maxNumThreads);
 
-    std::vector<int> array(size);
-    for (int j = 0; j < size; ++j) array[j] = j % 10;
+    std::vector<size_t> array(size);
+    for (size_t j = 0; j < size; ++j) array[j] = j % 10;
 
     CpuMonitor cpuMonitor;
     std::cout << "CPU load before start: " << cpuMonitor.getCpuUsage() << "%\n";
 
-
     PTP_POOL pool = CreateThreadpool(NULL);
     SetThreadpoolThreadMaximum(pool, numThreads);
-    SetThreadpoolThreadMinimum(pool, 1);
+    SetThreadpoolThreadMinimum(pool, 0);
 
     PTP_CLEANUP_GROUP cleanupGroup = CreateThreadpoolCleanupGroup();
     TP_CALLBACK_ENVIRON callbackEnviron;
@@ -192,8 +209,7 @@ int main() {
     SetThreadpoolCallbackCleanupGroup(&callbackEnviron, cleanupGroup, NULL);
 
 
-    PTP_WORK monitorWork = CreateThreadpoolWork(MonitorCpuUsageCallback, &cpuMonitor, &callbackEnviron);
-    SubmitThreadpoolWork(monitorWork);
+    HANDLE cpuMonitorThread = CreateThread(NULL, 0, monitorCpuUsage, &cpuMonitor, 0, NULL);
 
     auto start = std::chrono::high_resolution_clock::now();
     sortAndMerge(array.data(), size, numThreads, pool, cleanupGroup, &callbackEnviron);
@@ -204,13 +220,18 @@ int main() {
 
     monitoringCpu = false;
 
-    WaitForThreadpoolWorkCallbacks(monitorWork, FALSE);
-    CloseThreadpoolWork(monitorWork);
+
+    WaitForSingleObject(cpuMonitorThread, INFINITE);
+    CloseHandle(cpuMonitorThread);
 
     CloseThreadpoolCleanupGroupMembers(cleanupGroup, FALSE, NULL);
     CloseThreadpoolCleanupGroup(cleanupGroup);
     CloseThreadpool(pool);
     DestroyThreadpoolEnvironment(&callbackEnviron);
+
+//    for (size_t i = 0; i < size; ++i) {
+//        std::cout << array[i];
+//    }
 
     std::cout << "CPU load after execution: " << cpuMonitor.getCpuUsage() << "%\n";
     return 0;
