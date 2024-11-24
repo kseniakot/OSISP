@@ -51,7 +51,7 @@ DWORD WINAPI monitorCpuUsage(LPVOID param) {
 
     double averageCpuUsage = std::accumulate(cpuUsageValues.begin(), cpuUsageValues.end(), 0.0) / cpuUsageValues.size();
     std::lock_guard<std::mutex> lock(coutMutex);
-    std::cout << "Average CPU load during execution: " << averageCpuUsage << "%\n";
+    // std::cout << "Average CPU load during execution: " << averageCpuUsage << "%\n";
 
     return 0;
 }
@@ -97,9 +97,6 @@ VOID CALLBACK SortCallback(PTP_CALLBACK_INSTANCE, PVOID param, PTP_WORK) {
         std::cout << "Thread " << data->threadId << ": done sorting\n";
     }
 }
-
-
-
 
 
 VOID CALLBACK MergeCallback(PTP_CALLBACK_INSTANCE, PVOID param, PTP_WORK) {
@@ -163,7 +160,7 @@ void parallelMerge(size_t *arr, size_t size, size_t numThreads, PTP_POOL pool, P
 
 void sortAndMerge(size_t *arr, size_t size, size_t numThreads, PTP_POOL pool, PTP_CLEANUP_GROUP cleanupGroup,
                   PTP_CALLBACK_ENVIRON callbackEnviron) {
-    if (numThreads == 1){
+    if (numThreads == 1) {
 
     }
     parallelSort(arr, size, numThreads, pool, cleanupGroup, callbackEnviron);
